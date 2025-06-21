@@ -1,6 +1,6 @@
 """
 AI Pause Model - Parameters Configuration
-Extracted from Playbook modeling 1.xlsx
+Updated with Dirichlet distributions for proper share sampling
 """
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
@@ -16,13 +16,11 @@ class DistributionParams:
     def to_lognormal_params(self):
         """Convert percentiles to lognormal distribution parameters (mu, sigma)"""
         # Using the 50th percentile as the median and deriving sigma from the spread
-        median = self.p50
-        # Calculate sigma using the relationship between percentiles
         # For lognormal: ln(p85/p50) ≈ 1.036*sigma, ln(p50/p15) ≈ 1.036*sigma
         upper_ratio = np.log(self.p85 / self.p50) / 1.036
         lower_ratio = np.log(self.p50 / self.p15) / 1.036
         sigma = (upper_ratio + lower_ratio) / 2
-        mu = np.log(median)
+        mu = np.log(self.p50)
         return mu, sigma
 
 # Global Hardware Parameters (March 2027 starting conditions)
@@ -32,18 +30,142 @@ HARDWARE_GLOBAL = {
     'bandwidth_million_tb_s': DistributionParams(28, 70, 140),
 }
 
-# Hardware shares by actor type (fixing 0 values)
-HARDWARE_SHARES = {
-    'coalition': DistributionParams(0.8, 0.9, 0.98),
-    'all_criminal_orgs': DistributionParams(0.002, 0.01, 0.02),
-    'us_secret_black_sites': DistributionParams(0.004, 0.02, 0.04),
-    'china_secret_black_sites': DistributionParams(0.004, 0.02, 0.04),
-    'eu_secret_black_sites': DistributionParams(0.002, 0.01, 0.02),
-    'random_other_black_sites': DistributionParams(0.0018, 0.009, 0.018),
-    'russia': DistributionParams(0.002, 0.01, 0.02),
-    'iran': DistributionParams(0.0001, 0.0005, 0.001),
-    'other_non_coalition_nations': DistributionParams(0.001, 0.005, 0.01),
+# Hardware shares by actor type - Updated for cleaner nation state allocation
+HARDWARE_SHARES_DIRICHLET = {
+    'coalition': 85,                         # 0.9 * 100
+    'all_criminal_orgs': 1,                  # 0.01 * 100  
+    'us_secret_black_sites': 2,              # 0.02 * 100
+    'china_secret_black_sites': 2,           # 0.02 * 100
+    'eu_secret_black_sites': 1,              # 0.01 * 100
+    'random_other_black_sites': 1,         # 0.009 * 100
+    'all_nation_states': 8,               # Combined: russia + iran + other nations
 }
+
+# Black site internal shares using Dirichlet
+BLACK_SITE_DIRICHLET = {
+    'us_black_sites': {
+        'site_alphas': [1, 1, 1]  # 3 sites, equal probability
+    },
+    'china_black_sites': {
+        'site_alphas': [1, 1, 1]  # 3 sites, equal probability  
+    },
+    'eu_black_sites': {
+        'site_alphas': [1] * 10   # 10 sites, equal probability
+    },
+    'other_coalition_black_sites': {
+        'site_alphas': [1] * 20   # 20 sites, equal probability
+    }
+}
+
+def sample_black_site_shares():
+    """Sample black site shares within each country/region using Dirichlet"""
+    return {
+        'us_sites': np.random.dirichlet(BLACK_SITE_DIRICHLET['us_black_sites']['site_alphas']),
+        'china_sites': np.random.dirichlet(BLACK_SITE_DIRICHLET['china_black_sites']['site_alphas']),
+        'eu_sites': np.random.dirichlet(BLACK_SITE_DIRICHLET['eu_black_sites']['site_alphas']),
+        'other_coalition_sites': np.random.dirichlet(BLACK_SITE_DIRICHLET['other_coalition_black_sites']['site_alphas'])
+    }
+
+def sample_hardware_shares():
+    """Sample hardware shares that sum to 1"""
+    alphas = list(HARDWARE_SHARES_DIRICHLET.values())
+    names = list(HARDWARE_SHARES_DIRICHLET.keys())
+    shares = np.random.dirichlet(alphas)
+    return dict(zip(names, shares))
+
+# Coalition member share distributions using Dirichlet
+COALITION_INTERNAL_DIRICHLET = {
+    'us_alpha': 75,      # Reflects 40-75% range, higher concentration
+    'china_alpha': 15,   # Reflects 10-40% range  
+    'eu_alpha': 5,      # Reflects 10-25% range
+    'rest_alpha': 5      # Remainder gets smaller share
+}
+
+def sample_coalition_internal_shares():
+    """Sample coalition member shares using Dirichlet distribution"""
+    alphas = [
+        COALITION_INTERNAL_DIRICHLET['us_alpha'],
+        COALITION_INTERNAL_DIRICHLET['china_alpha'], 
+        COALITION_INTERNAL_DIRICHLET['eu_alpha'],
+        COALITION_INTERNAL_DIRICHLET['rest_alpha']
+    ]
+    shares = np.random.dirichlet(alphas)
+    return {
+        'us_share': shares[0],
+        'china_share': shares[1],
+        'eu_share': shares[2], 
+        'rest_share': shares[3]
+    }
+
+# Criminal organization hierarchy using Dirichlet
+CRIMINAL_ORG_DIRICHLET = {
+    # Major orgs get higher alphas (more concentrated, power law-like)
+    'major_alphas': [20, 15, 12, 10, 8, 6, 5, 4, 3, 2],  # Decreasing concentration
+    'minor_alphas': [1] * 25,  # More uniform for minor orgs
+    'major_total_weight': 75,  # Major orgs get 75% of total criminal compute
+    'minor_total_weight': 25   # Minor orgs get 25% of total criminal compute
+}
+
+def sample_criminal_org_shares():
+    """Sample criminal organization shares using Dirichlet distributions"""
+    # Sample major org shares
+    major_shares = np.random.dirichlet(CRIMINAL_ORG_DIRICHLET['major_alphas'])
+    
+    # Sample minor org shares  
+    minor_shares = np.random.dirichlet(CRIMINAL_ORG_DIRICHLET['minor_alphas'])
+    
+    # Weight by major/minor allocation
+    major_weight = CRIMINAL_ORG_DIRICHLET['major_total_weight'] / 100
+    minor_weight = CRIMINAL_ORG_DIRICHLET['minor_total_weight'] / 100
+    
+    return {
+        'major_shares': major_shares * major_weight,
+        'minor_shares': minor_shares * minor_weight
+    }
+
+# Nation state shares using Dirichlet
+NATION_STATE_DIRICHLET = {
+    # Specific nation alphas (higher values = more likely to get larger shares)
+    'russia_alpha': 15,
+    'iran_alpha': 2,
+    'north_korea_alpha': 1,
+    'iraq_alpha': 1,
+    'syria_alpha': 1,
+    
+    # Other nations alphas (decreasing concentration)
+    'other_nations_alphas': [3, 2.5, 2, 1.5, 1.2, 1, 0.8, 0.6, 0.5, 0.4, 0.3, 0.2, 0.2, 0.2, 0.2]
+}
+
+def sample_nation_state_shares():
+    """Sample nation state shares using Dirichlet distribution"""
+    # Sample specific nation shares
+    specific_alphas = [
+        NATION_STATE_DIRICHLET['russia_alpha'],
+        NATION_STATE_DIRICHLET['iran_alpha'],
+        NATION_STATE_DIRICHLET['north_korea_alpha'],
+        NATION_STATE_DIRICHLET['iraq_alpha'],
+        NATION_STATE_DIRICHLET['syria_alpha']
+    ]
+    
+    # Sample other nations shares
+    other_alphas = NATION_STATE_DIRICHLET['other_nations_alphas']
+    
+    # Combine all alphas for joint sampling
+    all_alphas = specific_alphas + other_alphas
+    all_shares = np.random.dirichlet(all_alphas)
+    
+    # Split back into specific and other nations
+    specific_shares = all_shares[:5]
+    other_shares = all_shares[5:]
+    
+    return {
+        'russia': specific_shares[0],
+        'iran': specific_shares[1], 
+        'north_korea': specific_shares[2],
+        'iraq': specific_shares[3],
+        'syria': specific_shares[4],
+        'other_nation_shares': other_shares
+    }
 
 # Pre-deal hardware ownership
 PRE_DEAL_OWNERSHIP = {
@@ -53,19 +175,74 @@ PRE_DEAL_OWNERSHIP = {
     'non_agi_usage_share': DistributionParams(0.05, 0.1, 0.2),
 }
 
-# Cluster size distributions
-CLUSTER_SIZES = {
+# Cluster size distributions using Dirichlet
+CLUSTER_SIZE_DIRICHLET = {
     'coalition': {
-        'large_cluster_share': 0.72,  # >100K H100e
-        'medium_cluster_share': 0.23,  # 1K-100K H100e
-        'small_cluster_share': 0.05,  # <1K H100e
+        # More concentrated - fewer, larger clusters
+        'large_cluster_alphas': [50, 40, 30, 20, 20, 20, 15, 10, 10],  # 5 large clusters (>100K H100e)
+        'medium_cluster_alphas': [8, 7, 6, 4, 3, 2, 1],   # 6 medium clusters (1K-100K H100e)  
+        'small_cluster_alphas': [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],             # 3 small clusters (<1K H100e)
+        'large_cluster_share': 0.72,
+        'medium_cluster_share': 0.23,
+        'small_cluster_share': 0.05,
+        'large_cluster_size_range': (100000, 10000000),
+        'medium_cluster_size_range': (1000, 100000),
+        'small_cluster_size_range': (10, 1000)
     },
     'non_coalition': {
+        # Less concentrated - more, smaller clusters
+        'large_cluster_alphas': [5, 3],                 # 2 large clusters  
+        'medium_cluster_alphas': [3, 2, 2, 1, 1, 1, 1], # 7 medium clusters
+        'small_cluster_alphas': [1] * 8,                # 8 small clusters
         'large_cluster_share': 0.12,
         'medium_cluster_share': 0.53,
         'small_cluster_share': 0.35,
+        'large_cluster_size_range': (100000, 300000),
+        'medium_cluster_size_range': (1000, 50000),
+        'small_cluster_size_range': (10, 800)
     }
 }
+
+def sample_cluster_allocations(total_compute: float, is_coalition: bool):
+    """Sample cluster sizes using Dirichlet distributions"""
+    if is_coalition:
+        config = CLUSTER_SIZE_DIRICHLET['coalition']
+    else:
+        config = CLUSTER_SIZE_DIRICHLET['non_coalition']
+    
+    clusters = []
+    
+    # Large clusters
+    large_compute = total_compute * config['large_cluster_share']
+    if large_compute > 100000:  # Only create if sufficient compute
+        large_shares = np.random.dirichlet(config['large_cluster_alphas'])
+        for share in large_shares:
+            cluster_compute = large_compute * share
+            clusters.append(cluster_compute)
+    
+    # Medium clusters  
+    medium_compute = total_compute * config['medium_cluster_share']
+    if medium_compute > 1000:
+        medium_shares = np.random.dirichlet(config['medium_cluster_alphas'])
+        for share in medium_shares:
+            cluster_compute = medium_compute * share
+            clusters.append(cluster_compute)
+    
+    # Small clusters
+    small_compute = total_compute * config['small_cluster_share']
+    if small_compute > 100:
+        small_shares = np.random.dirichlet(config['small_cluster_alphas'])
+        for share in small_shares:
+            cluster_compute = small_compute * share
+            clusters.append(cluster_compute)
+    
+    # Handle remainder as a single cluster if significant
+    allocated_compute = sum(clusters)
+    remainder = total_compute - allocated_compute
+    if remainder > 50:  # Add remainder as final cluster
+        clusters.append(remainder)
+    
+    return len(clusters), clusters
 
 # Software/R&D Parameters
 SOFTWARE_PARAMS = {
@@ -242,9 +419,6 @@ def months_behind_to_multiplier(leading_multiplier: float, months_behind: float)
     
     return multipliers[0]  # Fallback
 
-# Other nation shares (more dynamic)
-OTHER_NATION_SHARES = [0.15, 0.12, 0.11, 0.10, 0.09, 0.08, 0.07, 0.06, 0.05, 0.04, 0.03, 0.02, 0.02, 0.02, 0.02, 0.02]
-
 # Coalition sabotage and neutralization parameters (Phase 2 transition parameters)
 # These represent coalition capabilities to disrupt non-coalition actors
 COALITION_DISRUPTION = {
@@ -286,14 +460,6 @@ def continuous_to_threat_level(continuous_value: float) -> str:
         return 'OC5'
     else:
         return 'OC6'
-
-# Coalition member share distributions (controls US/China/EU allocation)
-COALITION_INTERNAL_SHARES = {
-    'us_base_share': DistributionParams(0.4, 0.6, 0.75),  # US gets 40-75% of coalition hardware
-    'china_base_share': DistributionParams(0.1, 0.25, 0.4),  # China gets 10-40% of coalition hardware  
-    'eu_base_share': DistributionParams(0.1, 0.15, 0.25),  # EU gets 10-25% of coalition hardware
-    # Rest of coalition gets remainder
-}
 
 # Random seed configuration
 RANDOM_SEED_CONFIG = {

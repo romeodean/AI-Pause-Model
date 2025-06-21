@@ -1,6 +1,6 @@
 """
 AI Pause Model - Actor Generation (Phase 1)
-Generates actors with hardware and software characteristics based on model parameters
+Updated with Dirichlet distributions for proper share sampling
 """
 
 import numpy as np
@@ -53,7 +53,6 @@ class Actor:
 
 class ActorGenerator:
     """Generates actors for the AI pause simulation"""
-    
     def __init__(self, random_seed: int = 42):
         """Initialize the generator with a random seed for reproducibility"""
         np.random.seed(random_seed)
@@ -64,6 +63,15 @@ class ActorGenerator:
         self.global_memory = self._sample_from_distribution(HARDWARE_GLOBAL['memory_million_tb']) * 1e6
         self.global_bandwidth = self._sample_from_distribution(HARDWARE_GLOBAL['bandwidth_million_tb_s']) * 1e6
         
+        # Sample hardware shares using Dirichlet (ensures they sum to 1)
+        self.hardware_shares = sample_hardware_shares()
+        
+        # Sample Dirichlet distributions for internal allocations
+        self.coalition_shares = sample_coalition_internal_shares()
+        self.criminal_shares = sample_criminal_org_shares()
+        self.nation_shares = sample_nation_state_shares()
+        self.black_site_shares = sample_black_site_shares()
+        
         # Sample open source months behind once for all actors that use it
         self.open_source_months_behind = self._sample_from_distribution(REFERENCE_MONTHS_BEHIND['open_source'])
         
@@ -71,50 +79,18 @@ class ActorGenerator:
         print(f"  Compute: {self.global_compute/1e6:.1f}M H100e")
         print(f"  Memory: {self.global_memory/1e6:.1f}M TB")
         print(f"  Bandwidth: {self.global_bandwidth/1e6:.1f}M TB/s")
-        print(f"  Open source months behind: {self.open_source_months_behind:.1f} months")
-    
+        print(f"Hardware shares: {self.hardware_shares}")
+        print(f"Coalition internal shares: {self.coalition_shares}")
+        print(f"Black site shares sampled: US({len(self.black_site_shares['us_sites'])} sites), China({len(self.black_site_shares['china_sites'])} sites), EU({len(self.black_site_shares['eu_sites'])} sites), Other({len(self.black_site_shares['other_coalition_sites'])} sites)")
+
     def _sample_from_distribution(self, dist_params: DistributionParams) -> float:
         """Sample from a lognormal distribution based on percentiles"""
         mu, sigma = dist_params.to_lognormal_params()
         return np.random.lognormal(mu, sigma)
     
     def _allocate_cluster_sizes(self, total_compute: float, is_coalition: bool) -> Tuple[int, List[float]]:
-        """Allocate compute across clusters based on size distributions"""
-        if is_coalition:
-            large_share = CLUSTER_SIZES['coalition']['large_cluster_share']
-            medium_share = CLUSTER_SIZES['coalition']['medium_cluster_share']
-            small_share = CLUSTER_SIZES['coalition']['small_cluster_share']
-        else:
-            large_share = CLUSTER_SIZES['non_coalition']['large_cluster_share']
-            medium_share = CLUSTER_SIZES['non_coalition']['medium_cluster_share']
-            small_share = CLUSTER_SIZES['non_coalition']['small_cluster_share']
-        
-        clusters = []
-        remaining_compute = total_compute
-        
-        # Large clusters (>100K H100e)
-        large_compute = total_compute * large_share
-        while large_compute > 100000 and remaining_compute > 100000:
-            cluster_size = np.random.uniform(100000, min(remaining_compute, 500000))
-            clusters.append(cluster_size)
-            remaining_compute -= cluster_size
-            large_compute -= cluster_size
-        
-        # Medium clusters (1K-100K H100e)
-        medium_compute = total_compute * medium_share
-        while medium_compute > 1000 and remaining_compute > 1000:
-            cluster_size = np.random.uniform(1000, min(remaining_compute, 100000))
-            clusters.append(cluster_size)
-            remaining_compute -= cluster_size
-            medium_compute -= cluster_size
-        
-        # Small clusters (<1K H100e)
-        while remaining_compute > 100:
-            cluster_size = min(remaining_compute, np.random.uniform(10, 1000))
-            clusters.append(cluster_size)
-            remaining_compute -= cluster_size
-        
-        return len(clusters), clusters
+        """Allocate compute across clusters using Dirichlet distributions"""
+        return sample_cluster_allocations(total_compute, is_coalition)
     
     def _get_months_behind(self, actor_type: str) -> float:
         """Get months behind coalition for actor type"""
@@ -277,33 +253,18 @@ class ActorGenerator:
         )
     
     def generate_coalition_actors(self) -> List[Actor]:
-        """Generate coalition member actors"""
+        """Generate coalition member actors using Dirichlet-sampled shares"""
         actors = []
         
-        # Sample coalition's total share
-        coalition_share = self._sample_from_distribution(HARDWARE_SHARES['coalition'])
+        # Get coalition's total share and internal allocations
+        coalition_share = self.hardware_shares['coalition']
         
-        # Sample internal coalition shares
-        us_share = self._sample_from_distribution(COALITION_INTERNAL_SHARES['us_base_share'])
-        china_share = self._sample_from_distribution(COALITION_INTERNAL_SHARES['china_base_share'])
-        eu_share = self._sample_from_distribution(COALITION_INTERNAL_SHARES['eu_base_share'])
-        
-        # Normalize to ensure they sum to 1
-        total_explicit = us_share + china_share + eu_share
-        if total_explicit > 1.0:
-            us_share /= total_explicit
-            china_share /= total_explicit
-            eu_share /= total_explicit
-            rest_share = 0.0
-        else:
-            rest_share = 1.0 - total_explicit
-        
-        # Coalition members with their shares
+        # Coalition members with their Dirichlet-sampled shares
         coalition_members = [
-            ('US', us_share, 'coalition'),
-            ('China', china_share, 'coalition'),
-            ('EU', eu_share, 'coalition'),
-            ('Rest of Coalition', rest_share, 'coalition')
+            ('US', self.coalition_shares['us_share'], 'coalition'),
+            ('China', self.coalition_shares['china_share'], 'coalition'),
+            ('EU', self.coalition_shares['eu_share'], 'coalition'),
+            ('Rest of Coalition', self.coalition_shares['rest_share'], 'coalition')
         ]
         
         for name, share, actor_type in coalition_members:
@@ -321,94 +282,100 @@ class ActorGenerator:
         return actors
     
     def generate_black_site_actors(self) -> List[Actor]:
-        """Generate black site actors (all sanctioned by definition)"""
+        """Generate black site actors using Dirichlet-sampled shares"""
         actors = []
         
-        black_site_configs = [
-            ('us_secret_black_sites', 'us_rogue', 'US Black Site'),
-            ('china_secret_black_sites', 'china_rogue', 'China Black Site'),
-            ('eu_secret_black_sites', 'eu_rogue', 'EU Black Site'),
-            ('random_other_black_sites', 'other_coalition_rogue', 'Coalition Black Site')
-        ]
+        # US Black Sites
+        us_total_share = self.hardware_shares['us_secret_black_sites']
+        for i, site_share in enumerate(self.black_site_shares['us_sites']):
+            share = us_total_share * site_share
+            name = f"US Black Site {i+1}"
+            actor = self._create_actor(name, 'us_secret_black_sites', share, is_coalition=True)
+            actors.append(actor)
         
-        for share_key, count_key, name_prefix in black_site_configs:
-            total_share = self._sample_from_distribution(HARDWARE_SHARES[share_key])
-            count = ACTOR_DEFINITIONS['rogue_black_sites'][count_key]
-            
-            for i in range(count):
-                share = total_share / count
-                name = f"{name_prefix} {i+1}"
-                actor = self._create_actor(name, share_key, share, is_coalition=False)
-                actors.append(actor)
+        # China Black Sites  
+        china_total_share = self.hardware_shares['china_secret_black_sites']
+        for i, site_share in enumerate(self.black_site_shares['china_sites']):
+            share = china_total_share * site_share
+            name = f"China Black Site {i+1}"
+            actor = self._create_actor(name, 'china_secret_black_sites', share, is_coalition=True)
+            actors.append(actor)
+        
+        # EU Black Sites
+        eu_total_share = self.hardware_shares['eu_secret_black_sites']
+        for i, site_share in enumerate(self.black_site_shares['eu_sites']):
+            share = eu_total_share * site_share
+            name = f"EU Black Site {i+1}"
+            actor = self._create_actor(name, 'eu_secret_black_sites', share, is_coalition=True)
+            actors.append(actor)
+        
+        # Other Coalition Black Sites
+        other_total_share = self.hardware_shares['random_other_black_sites']
+        for i, site_share in enumerate(self.black_site_shares['other_coalition_sites']):
+            share = other_total_share * site_share
+            name = f"Coalition Black Site {i+1}"
+            actor = self._create_actor(name, 'random_other_black_sites', share, is_coalition=True)
+            actors.append(actor)
         
         return actors
     
     def generate_criminal_org_actors(self) -> List[Actor]:
-        """Generate criminal organization actors with dynamic share distribution"""
+        """Generate criminal organization actors using Dirichlet-sampled shares"""
         actors = []
         
-        total_criminal_share = self._sample_from_distribution(HARDWARE_SHARES['all_criminal_orgs'])
+        total_criminal_share = self.hardware_shares['all_criminal_orgs']
         
-        # Generate shares using power law for more realistic allocation
-        major_count = ACTOR_DEFINITIONS['criminal_orgs']['major_criminal_orgs']
-        minor_count = ACTOR_DEFINITIONS['criminal_orgs']['minor_criminal_orgs']
-        
-        # Create power law distribution for major orgs (more concentrated)
-        major_alphas = [10/(i+1)**1.5 for i in range(major_count)]  # Power law decay
-        major_total = sum(major_alphas)
-        major_shares = [alpha/major_total for alpha in major_alphas]
-        major_total_share = 0.75  # Major orgs get 75% of total
-        
-        # Create more uniform distribution for minor orgs
-        minor_shares = [1/minor_count for _ in range(minor_count)]  # Uniform
-        minor_total_share = 1.0 - major_total_share
+        # Get Dirichlet-sampled shares
+        major_shares = self.criminal_shares['major_shares']
+        minor_shares = self.criminal_shares['minor_shares']
         
         # Create major criminal orgs
         for i, relative_share in enumerate(major_shares):
-            share = total_criminal_share * major_total_share * relative_share
+            share = total_criminal_share * relative_share
             name = f"Criminal Org #{i+1}"
             actor = self._create_actor(name, 'criminal_org_major', share, is_coalition=False)
             actors.append(actor)
         
         # Create minor criminal orgs
         for i, relative_share in enumerate(minor_shares):
-            share = total_criminal_share * minor_total_share * relative_share
-            name = f"Criminal Org #{i+major_count+1}"
+            share = total_criminal_share * relative_share
+            name = f"Criminal Org #{i+len(major_shares)+1}"
             actor = self._create_actor(name, 'criminal_org_minor', share, is_coalition=False)
             actors.append(actor)
         
         return actors
     
     def generate_nation_state_actors(self) -> List[Actor]:
-        """Generate nation state actors"""
+        """Generate nation state actors using Dirichlet-sampled shares"""
         actors = []
         
-        # Specific nation states
-        specific_nations = ['russia', 'north_korea', 'iran', 'iraq', 'syria']
+        # Get total share for all nation states (now unified)
+        total_nation_share = self.hardware_shares['all_nation_states']
         
-        for nation in specific_nations:
-            if nation in HARDWARE_SHARES:
-                share = self._sample_from_distribution(HARDWARE_SHARES[nation])
-            else:
-                # Use a fraction of other_non_coalition_nations as default
-                share = self._sample_from_distribution(HARDWARE_SHARES['other_non_coalition_nations']) * 0.1
+        # Specific nation states with Dirichlet-sampled shares
+        specific_nations = ['russia', 'iran', 'north_korea', 'iraq', 'syria']
+        
+        for i, nation in enumerate(specific_nations):
+            if nation == 'russia':
+                share = total_nation_share * self.nation_shares['russia']
+            elif nation == 'iran':
+                share = total_nation_share * self.nation_shares['iran']
+            elif nation == 'north_korea':
+                share = total_nation_share * self.nation_shares['north_korea']
+            elif nation == 'iraq':
+                share = total_nation_share * self.nation_shares['iraq']
+            elif nation == 'syria':
+                share = total_nation_share * self.nation_shares['syria']
             
             name = nation.replace('_', ' ').title()
             actor = self._create_actor(name, nation, share, is_coalition=False)
             actors.append(actor)
         
-        # Other non-coalition nations with realistic share distribution
-        other_nations_total_share = self._sample_from_distribution(HARDWARE_SHARES['other_non_coalition_nations'])
+        # Other non-coalition nations with Dirichlet-sampled shares
+        other_nation_shares = self.nation_shares['other_nation_shares']
         
-        # Use realistic shares for other nations
-        other_nation_count = ACTOR_DEFINITIONS['other_nations']
-        other_nation_shares = OTHER_NATION_SHARES[:other_nation_count]
-        # Normalize the shares to sum to 1
-        total_relative = sum(other_nation_shares)
-        normalized_shares = [s/total_relative for s in other_nation_shares]
-        
-        for i, relative_share in enumerate(normalized_shares):
-            share = other_nations_total_share * relative_share
+        for i, relative_share in enumerate(other_nation_shares):
+            share = total_nation_share * relative_share
             name = f"Other Nation {i+1}"
             actor = self._create_actor(name, 'other_nation', share, is_coalition=False)
             actors.append(actor)
@@ -544,6 +511,17 @@ class ActorGenerator:
         print(f"  Large clusters (>100K H100e): {len(large_clusters)} ({sum(large_clusters)/total_compute:.1%} of compute)")
         print(f"  Medium clusters (1K-100K H100e): {len(medium_clusters)} ({sum(medium_clusters)/total_compute:.1%} of compute)")
         print(f"  Small clusters (<1K H100e): {len(small_clusters)} ({sum(small_clusters)/total_compute:.1%} of compute)")
+
+        # Dirichlet sampling validation
+        print(f"\nDirichlet Sampling Validation:")
+        print(f"  Coalition shares sum: {sum(self.coalition_shares.values()):.6f} (should be 1.0)")
+        print(f"  Criminal major shares sum: {sum(self.criminal_shares['major_shares']):.6f}")
+        print(f"  Criminal minor shares sum: {sum(self.criminal_shares['minor_shares']):.6f}")
+        print(f"  Nation state shares sum: {sum([self.nation_shares[k] for k in ['russia', 'iran', 'north_korea', 'iraq', 'syria']] + list(self.nation_shares['other_nation_shares'])):.6f} (should be 1.0)")
+        print(f"  US black sites sum: {sum(self.black_site_shares['us_sites']):.6f} (should be 1.0)")
+        print(f"  China black sites sum: {sum(self.black_site_shares['china_sites']):.6f} (should be 1.0)")
+        print(f"  EU black sites sum: {sum(self.black_site_shares['eu_sites']):.6f} (should be 1.0)")
+        print(f"  Other coalition black sites sum: {sum(self.black_site_shares['other_coalition_sites']):.6f} (should be 1.0)")
 
 def save_actors_to_csv(actors: List[Actor], filename: str = "ai_pause_actors.csv"):
     """Save actors to CSV file for further analysis"""
