@@ -9,7 +9,8 @@ STATUS: WIP model that i'm implementing in 3 phases
 STATUS: In progress
 
 RUN INSTRUCTIONS: 
-``` python run_phase1.py
+```
+python run_phase1.py
 ```
 #### PHASE 1 SUMMARY
 
