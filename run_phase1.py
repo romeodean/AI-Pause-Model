@@ -31,8 +31,12 @@ def analyze_actor_distribution(actors):
             'months_behind_coalition': actor.months_behind_coalition,
             'base_ai_research_talent': actor.base_ai_research_talent,
             'threat_level': actor.threat_level,
-            'is_sanctioned': actor.is_sanctioned,
-            'is_coalition_member': actor.is_coalition_member
+            'security_level': actor.security_level,
+            'military_defense_level': actor.military_defense_level,
+            'sabotage_slowdown_factor': actor.sabotage_slowdown_factor,
+            'neutralization_probability': actor.neutralization_probability,
+            'is_coalition_member': actor.is_coalition_member,
+            'is_neutralized': actor.is_neutralized
         })
     
     df = pd.DataFrame(data)
@@ -74,15 +78,11 @@ def analyze_actor_distribution(actors):
     # Black site analysis
     black_site_df = df[df['actor_type'].str.contains('black_site', case=False, na=False)]
     if len(black_site_df) > 0:
-        sanctioned_black_sites = black_site_df[black_site_df['is_sanctioned']]
-        unsanctioned_black_sites = black_site_df[~black_site_df['is_sanctioned']]
-        
         print(f"\nBlack Site Analysis:")
         print(f"  Total black sites: {len(black_site_df)}")
-        print(f"  Sanctioned: {len(sanctioned_black_sites)} ({len(sanctioned_black_sites)/len(black_site_df):.1%})")
-        print(f"  Unsanctioned: {len(unsanctioned_black_sites)} ({len(unsanctioned_black_sites)/len(black_site_df):.1%})")
         print(f"  Total black site compute: {black_site_df['compute_h100e'].sum()/1e6:.2f}M H100e")
         print(f"  Black site share of global compute: {black_site_df['compute_h100e'].sum()/df['compute_h100e'].sum():.2%}")
+        print(f"  Avg neutralization probability: {black_site_df['neutralization_probability'].mean():.3f}")
     
     # Criminal organization analysis
     criminal_df = df[df['actor_type'].str.contains('criminal', case=False, na=False)]
@@ -95,8 +95,29 @@ def analyze_actor_distribution(actors):
         print(f"  Major criminal orgs: {len(major_criminal_df)}")
         print(f"  Minor criminal orgs: {len(minor_criminal_df)}")
         print(f"  Criminal org compute share: {criminal_df['compute_h100e'].sum()/df['compute_h100e'].sum():.3%}")
-        print(f"  Avg purchasing power (major): ${major_criminal_df['purchasing_power_billion_usd'].mean():.2f}B")
-        print(f"  Avg purchasing power (minor): ${minor_criminal_df['purchasing_power_billion_usd'].mean():.2f}B")
+        if len(major_criminal_df) > 0:
+            print(f"  Avg purchasing power (major): ${major_criminal_df['purchasing_power_billion_usd'].mean():.2f}B")
+        if len(minor_criminal_df) > 0:
+            print(f"  Avg purchasing power (minor): ${minor_criminal_df['purchasing_power_billion_usd'].mean():.2f}B")
+    
+    # Phase 2 readiness analysis
+    print(f"\nPhase 2 Transition Parameters:")
+    print("-" * 40)
+    non_coalition_df = df[~df['is_coalition_member']]
+    if len(non_coalition_df) > 0:
+        print(f"  Avg sabotage slowdown factor: {non_coalition_df['sabotage_slowdown_factor'].mean():.2f}")
+        print(f"  Avg neutralization probability: {non_coalition_df['neutralization_probability'].mean():.3f}")
+        if 'compute_lifetime_years' in df.columns:
+            print(f"  Avg hardware lifetime: {non_coalition_df['compute_lifetime_years'].mean():.1f} years")
+    
+    # Security and defense analysis
+    if 'security_level' in df.columns and 'military_defense_level' in df.columns:
+        print(f"\nSecurity & Defense Levels:")
+        print("-" * 40)
+        for level in range(1, 6):
+            security_count = len(df[df['security_level'] == level])
+            defense_count = len(df[df['military_defense_level'] == level])
+            print(f"  Level {level}: Security {security_count:2d} actors, Defense {defense_count:2d} actors")
     
     return df
 
@@ -146,18 +167,27 @@ def export_for_simulation(actors, filename="ai_pause_initial_state.json"):
                 "memory_tb": actor.memory_tb,
                 "bandwidth_tb_s": actor.bandwidth_tb_s,
                 "num_clusters": actor.num_clusters,
-                "cluster_sizes": actor.cluster_sizes
+                "cluster_sizes": actor.cluster_sizes,
+                "compute_lifetime_years": actor.compute_lifetime_years,
+                "memory_lifetime_years": actor.memory_lifetime_years,
+                "bandwidth_lifetime_years": actor.bandwidth_lifetime_years
             },
             "capabilities": {
                 "purchasing_power_billion_usd": actor.purchasing_power_billion_usd,
                 "ai_rd_prog_multiplier": actor.ai_rd_prog_multiplier,
                 "months_behind_coalition": actor.months_behind_coalition,
                 "base_ai_research_talent": actor.base_ai_research_talent,
-                "threat_level": actor.threat_level
+                "threat_level": actor.threat_level,
+                "security_level": actor.security_level,
+                "military_defense_level": actor.military_defense_level
+            },
+            "phase2_params": {
+                "sabotage_slowdown_factor": actor.sabotage_slowdown_factor,
+                "neutralization_probability": actor.neutralization_probability
             },
             "status": {
-                "is_sanctioned": actor.is_sanctioned,
-                "is_coalition_member": actor.is_coalition_member
+                "is_coalition_member": actor.is_coalition_member,
+                "is_neutralized": actor.is_neutralized
             }
         }
         export_data["actors"].append(actor_data)

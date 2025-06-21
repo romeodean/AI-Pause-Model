@@ -23,20 +23,33 @@ class Actor:
     num_clusters: int = 0
     cluster_sizes: List[float] = field(default_factory=list)
     
+    # Hardware lifetime (for Phase 2 decay modeling)
+    compute_lifetime_years: float = 3.0
+    memory_lifetime_years: float = 3.0
+    bandwidth_lifetime_years: float = 3.0
+    
     # Software/R&D characteristics  
     purchasing_power_billion_usd: float = 0.0
     ai_rd_prog_multiplier: float = 1.0
     months_behind_coalition: float = 0.0
     base_ai_research_talent: float = 0.0
+    
+    # Security and defense
     threat_level: str = 'OC2'
+    security_level: int = 1
+    military_defense_level: int = 1
+    
+    # Phase 2 transition parameters
+    sabotage_slowdown_factor: float = 1.0  # How much coalition slows this actor
+    neutralization_probability: float = 0.0  # Chance of being shut down per period
     
     # Collaboration
     collaboration_partners: List[str] = field(default_factory=list)
     collaboration_efficiency: Dict[str, float] = field(default_factory=dict)
     
-    # Flags
-    is_sanctioned: bool = False
+    # Status flags
     is_coalition_member: bool = False
+    is_neutralized: bool = False
 
 class ActorGenerator:
     """Generates actors for the AI pause simulation"""
@@ -65,27 +78,16 @@ class ActorGenerator:
         mu, sigma = dist_params.to_lognormal_params()
         return np.random.lognormal(mu, sigma)
     
-    def _allocate_cluster_sizes(self, total_compute: float, actor_type: str) -> Tuple[int, List[float]]:
+    def _allocate_cluster_sizes(self, total_compute: float, is_coalition: bool) -> Tuple[int, List[float]]:
         """Allocate compute across clusters based on size distributions"""
-        # Determine if coalition or non-coalition
-        is_coalition = actor_type in ['coalition', 'us', 'china', 'eu'] or 'coalition' in actor_type.lower()
-        
         if is_coalition:
-            # Use fixed coalition cluster distribution
             large_share = CLUSTER_SIZES['coalition']['large_cluster_share']
             medium_share = CLUSTER_SIZES['coalition']['medium_cluster_share']
             small_share = CLUSTER_SIZES['coalition']['small_cluster_share']
         else:
-            # Use pre-deal distributions for non-coalition actors
-            large_share = self._sample_from_distribution(CLUSTER_SIZES['pre_deal']['large_cluster_share'])
-            medium_share = self._sample_from_distribution(CLUSTER_SIZES['pre_deal']['medium_cluster_share'])
-            small_share = self._sample_from_distribution(CLUSTER_SIZES['pre_deal']['small_cluster_share'])
-        
-        # Normalize shares
-        total_share = large_share + medium_share + small_share
-        large_share /= total_share
-        medium_share /= total_share
-        small_share /= total_share
+            large_share = CLUSTER_SIZES['non_coalition']['large_cluster_share']
+            medium_share = CLUSTER_SIZES['non_coalition']['medium_cluster_share']
+            small_share = CLUSTER_SIZES['non_coalition']['small_cluster_share']
         
         clusters = []
         remaining_compute = total_compute
@@ -122,11 +124,6 @@ class ActorGenerator:
                 return self.open_source_months_behind
             else:
                 return self._sample_from_distribution(months_behind_value)
-        elif 'criminal' in actor_type.lower():
-            # Use open source months behind
-            return self.open_source_months_behind
-        elif 'black_site' in actor_type.lower():
-            return self.open_source_months_behind
         else:
             # Default to open source months behind
             return self.open_source_months_behind
@@ -140,7 +137,7 @@ class ActorGenerator:
         elif 'black_site' in actor_type.lower():
             return self._sample_from_distribution(AI_RESEARCH_TALENT['random_other_black_sites'])
         else:
-            return self._sample_from_distribution(AI_RESEARCH_TALENT['criminal_orgs'])  # Conservative default
+            return self._sample_from_distribution(AI_RESEARCH_TALENT['criminal_orgs'])
     
     def _get_purchasing_power(self, actor_type: str) -> float:
         """Get purchasing power for actor type"""
@@ -161,110 +158,100 @@ class ActorGenerator:
             return self._sample_from_distribution(PURCHASING_POWER['other_nations'])
     
     def _assign_threat_level(self, actor_type: str) -> str:
-        """Assign threat level based on actor type"""
+        """Assign threat level based on actor type using distributions"""
         if 'coalition' in actor_type.lower():
-            return 'OC2'  # Lowest threat
-        elif 'criminal' in actor_type.lower():
-            return np.random.choice(['OC3', 'OC4', 'OC5'], p=[0.3, 0.5, 0.2])
-        elif actor_type in ['russia', 'iran', 'north_korea']:
-            return np.random.choice(['OC4', 'OC5'], p=[0.3, 0.7])
+            threat_dist = THREAT_LEVEL_DISTRIBUTIONS['coalition']
         elif 'black_site' in actor_type.lower():
-            return np.random.choice(['OC3', 'OC4', 'OC5'], p=[0.2, 0.5, 0.3])
+            threat_dist = THREAT_LEVEL_DISTRIBUTIONS['black_sites']
+        elif 'criminal' in actor_type.lower():
+            threat_dist = THREAT_LEVEL_DISTRIBUTIONS['criminal_orgs']
+        elif actor_type in ['russia', 'iran', 'north_korea', 'iraq', 'syria']:
+            threat_dist = THREAT_LEVEL_DISTRIBUTIONS['nation_states']
         else:
-            return np.random.choice(['OC2', 'OC3', 'OC4'], p=[0.3, 0.5, 0.2])
+            threat_dist = THREAT_LEVEL_DISTRIBUTIONS['other_nations']
+        
+        continuous_value = self._sample_from_distribution(threat_dist)
+        return continuous_to_threat_level(continuous_value)
     
-    def generate_coalition_actors(self) -> List[Actor]:
-        """Generate coalition member actors"""
-        actors = []
+    def _assign_security_level(self, actor_type: str) -> int:
+        """Assign security level (1-5) based on actor type"""
+        if 'coalition' in actor_type.lower():
+            security_dist = SECURITY_LEVEL_DISTRIBUTIONS['coalition']
+        elif 'black_site' in actor_type.lower():
+            security_dist = SECURITY_LEVEL_DISTRIBUTIONS['black_sites']
+        elif 'criminal' in actor_type.lower():
+            security_dist = SECURITY_LEVEL_DISTRIBUTIONS['criminal_orgs']
+        elif actor_type in ['russia', 'iran', 'north_korea', 'iraq', 'syria']:
+            security_dist = SECURITY_LEVEL_DISTRIBUTIONS['nation_states']
+        else:
+            security_dist = SECURITY_LEVEL_DISTRIBUTIONS['other_nations']
         
-        # Sample coalition's total share
-        coalition_share = self._sample_from_distribution(HARDWARE_SHARES['coalition'])
-        
-        # Allocate within coalition based on pre-deal ownership
-        us_share = self._sample_from_distribution(PRE_DEAL_OWNERSHIP['us_share'])
-        china_share = self._sample_from_distribution(PRE_DEAL_OWNERSHIP['china_share'])
-        other_share = 1 - us_share - china_share
-        
-        # Coalition members
-        coalition_members = [
-            ('US', us_share * 0.7),  # 70% of US share
-            ('China', china_share * 0.8),  # 80% of China share  
-            ('EU', other_share * 0.6),  # 60% of other share
-            ('Rest of Coalition', us_share * 0.3 + china_share * 0.2 + other_share * 0.4)
-        ]
-        
-        for name, share in coalition_members:
-            actor_compute = self.global_compute * coalition_share * share
-            actor_memory = self.global_memory * coalition_share * share
-            actor_bandwidth = self.global_bandwidth * coalition_share * share
-            
-            num_clusters, cluster_sizes = self._allocate_cluster_sizes(actor_compute, name.lower())
-            
-            actor = Actor(
-                name=name,
-                actor_type='coalition',
-                compute_h100e=actor_compute,
-                memory_tb=actor_memory,
-                bandwidth_tb_s=actor_bandwidth,
-                num_clusters=num_clusters,
-                cluster_sizes=cluster_sizes,
-                purchasing_power_billion_usd=self._get_purchasing_power('coalition'),
-                ai_rd_prog_multiplier=self._sample_from_distribution(SOFTWARE_PARAMS['leading_internal_ai_rd_mult']),
-                months_behind_coalition=0.0,  # Coalition is the reference
-                base_ai_research_talent=self._get_ai_research_talent('coalition'),
-                threat_level='OC2',
-                is_coalition_member=True
-            )
-            actors.append(actor)
-        
-        return actors
+        return max(1, min(5, int(round(self._sample_from_distribution(security_dist)))))
     
-    def generate_black_site_actors(self) -> List[Actor]:
-        """Generate black site actors"""
-        actors = []
+    def _assign_military_defense_level(self, actor_type: str) -> int:
+        """Assign military defense level (1-5) based on actor type"""
+        if 'coalition' in actor_type.lower():
+            defense_dist = MILITARY_DEFENSE_DISTRIBUTIONS['coalition']
+        elif 'black_site' in actor_type.lower():
+            defense_dist = MILITARY_DEFENSE_DISTRIBUTIONS['black_sites']
+        elif 'criminal' in actor_type.lower():
+            defense_dist = MILITARY_DEFENSE_DISTRIBUTIONS['criminal_orgs']
+        elif actor_type in ['russia', 'iran', 'north_korea', 'iraq', 'syria']:
+            defense_dist = MILITARY_DEFENSE_DISTRIBUTIONS['nation_states']
+        else:
+            defense_dist = MILITARY_DEFENSE_DISTRIBUTIONS['other_nations']
         
-        # US black sites
-        us_total_share = self._sample_from_distribution(HARDWARE_SHARES['us_secret_black_sites'])
-        for i in range(ACTOR_DEFINITIONS['rogue_black_sites']['us_rogue']):
-            share = us_total_share / ACTOR_DEFINITIONS['rogue_black_sites']['us_rogue']
-            actor = self._create_black_site_actor(f"US Black Site {i+1}", share, 'us_secret_black_sites')
-            actor.is_sanctioned = True
-            actors.append(actor)
-        
-        # China black sites
-        china_total_share = self._sample_from_distribution(HARDWARE_SHARES['china_secret_black_sites'])
-        for i in range(ACTOR_DEFINITIONS['rogue_black_sites']['china_rogue']):
-            share = china_total_share / ACTOR_DEFINITIONS['rogue_black_sites']['china_rogue']
-            actor = self._create_black_site_actor(f"China Black Site {i+1}", share, 'china_secret_black_sites')
-            actor.is_sanctioned = True
-            actors.append(actor)
-        
-        # EU black sites
-        eu_total_share = self._sample_from_distribution(HARDWARE_SHARES['eu_secret_black_sites'])
-        for i in range(ACTOR_DEFINITIONS['rogue_black_sites']['eu_rogue']):
-            share = eu_total_share / ACTOR_DEFINITIONS['rogue_black_sites']['eu_rogue']
-            actor = self._create_black_site_actor(f"EU Black Site {i+1}", share, 'eu_secret_black_sites')
-            actor.is_sanctioned = True
-            actors.append(actor)
-        
-        # Other coalition black sites
-        other_total_share = self._sample_from_distribution(HARDWARE_SHARES['random_other_black_sites'])
-        for i in range(ACTOR_DEFINITIONS['rogue_black_sites']['other_coalition_rogue']):
-            share = other_total_share / ACTOR_DEFINITIONS['rogue_black_sites']['other_coalition_rogue']
-            actor = self._create_black_site_actor(f"Coalition Black Site {i+1}", share, 'random_other_black_sites')
-            # Mix of sanctioned and unsanctioned
-            actor.is_sanctioned = np.random.choice([True, False], p=[0.6, 0.4])
-            actors.append(actor)
-        
-        return actors
+        return max(1, min(5, int(round(self._sample_from_distribution(defense_dist)))))
     
-    def _create_black_site_actor(self, name: str, share: float, actor_type: str) -> Actor:
-        """Create a black site actor"""
-        actor_compute = self.global_compute * share
-        actor_memory = self.global_memory * share
-        actor_bandwidth = self.global_bandwidth * share
+    def _assign_coalition_disruption_params(self, actor_type: str) -> Tuple[float, float]:
+        """Assign sabotage and neutralization parameters for non-coalition actors"""
+        if 'coalition' in actor_type.lower():
+            return 1.0, 0.0  # Coalition doesn't get sabotaged
         
-        num_clusters, cluster_sizes = self._allocate_cluster_sizes(actor_compute, actor_type)
+        if 'black_site' in actor_type.lower():
+            sabotage_dist = COALITION_DISRUPTION['sabotage_slowdown_factor']['black_sites']
+            neutralization_dist = COALITION_DISRUPTION['neutralization_probability']['black_sites']
+        elif 'criminal' in actor_type.lower():
+            sabotage_dist = COALITION_DISRUPTION['sabotage_slowdown_factor']['criminal_orgs']
+            neutralization_dist = COALITION_DISRUPTION['neutralization_probability']['criminal_orgs']
+        elif actor_type in ['russia', 'iran', 'north_korea', 'iraq', 'syria']:
+            sabotage_dist = COALITION_DISRUPTION['sabotage_slowdown_factor']['nation_states']
+            neutralization_dist = COALITION_DISRUPTION['neutralization_probability']['nation_states']
+        else:
+            sabotage_dist = COALITION_DISRUPTION['sabotage_slowdown_factor']['other_nations']
+            neutralization_dist = COALITION_DISRUPTION['neutralization_probability']['other_nations']
+        
+        sabotage_factor = self._sample_from_distribution(sabotage_dist)
+        neutralization_prob = self._sample_from_distribution(neutralization_dist)
+        
+        return sabotage_factor, neutralization_prob
+    
+    def _create_actor(self, name: str, actor_type: str, compute_share: float, is_coalition: bool = False) -> Actor:
+        """Create an actor with all properties"""
+        # Hardware allocation
+        actor_compute = self.global_compute * compute_share
+        actor_memory = actor_compute * HARDWARE_SCALING['memory_per_h100e_tb']
+        actor_bandwidth = actor_compute * HARDWARE_SCALING['bandwidth_per_h100e_tb_s']
+        
+        num_clusters, cluster_sizes = self._allocate_cluster_sizes(actor_compute, is_coalition)
+        
+        # Hardware lifetimes
+        compute_lifetime = self._sample_from_distribution(HARDWARE_LIFETIME['compute_lifetime_years'])
+        memory_lifetime = self._sample_from_distribution(HARDWARE_LIFETIME['memory_lifetime_years'])
+        bandwidth_lifetime = self._sample_from_distribution(HARDWARE_LIFETIME['bandwidth_lifetime_years'])
+        
+        # AI capabilities
+        months_behind = self._get_months_behind(actor_type)
+        research_talent = self._get_ai_research_talent(actor_type)
+        purchasing_power = self._get_purchasing_power(actor_type)
+        
+        # Security and defense
+        threat_level = self._assign_threat_level(actor_type)
+        security_level = self._assign_security_level(actor_type)
+        military_defense_level = self._assign_military_defense_level(actor_type)
+        
+        # Coalition disruption parameters
+        sabotage_factor, neutralization_prob = self._assign_coalition_disruption_params(actor_type)
         
         return Actor(
             name=name,
@@ -274,113 +261,159 @@ class ActorGenerator:
             bandwidth_tb_s=actor_bandwidth,
             num_clusters=num_clusters,
             cluster_sizes=cluster_sizes,
-            purchasing_power_billion_usd=self._get_purchasing_power('black_site'),
-            ai_rd_prog_multiplier=1.0,  # Will be updated based on talent/hardware
-            months_behind_coalition=self._get_months_behind(actor_type),
-            base_ai_research_talent=self._get_ai_research_talent(actor_type),
-            threat_level=self._assign_threat_level(actor_type)
+            compute_lifetime_years=compute_lifetime,
+            memory_lifetime_years=memory_lifetime,
+            bandwidth_lifetime_years=bandwidth_lifetime,
+            purchasing_power_billion_usd=purchasing_power,
+            ai_rd_prog_multiplier=1.0,  # Will be updated later
+            months_behind_coalition=months_behind,
+            base_ai_research_talent=research_talent,
+            threat_level=threat_level,
+            security_level=security_level,
+            military_defense_level=military_defense_level,
+            sabotage_slowdown_factor=sabotage_factor,
+            neutralization_probability=neutralization_prob,
+            is_coalition_member=is_coalition
         )
     
-    def generate_criminal_org_actors(self) -> List[Actor]:
-        """Generate criminal organization actors with realistic share distribution"""
+    def generate_coalition_actors(self) -> List[Actor]:
+        """Generate coalition member actors"""
         actors = []
         
-        total_criminal_share = self._sample_from_distribution(HARDWARE_SHARES['all_criminal_orgs'])
+        # Sample coalition's total share
+        coalition_share = self._sample_from_distribution(HARDWARE_SHARES['coalition'])
         
-        # Use predefined shares for 10 criminal orgs
-        criminal_shares = CRIMINAL_ORG_SHARES[:10]  # Take first 10 shares
+        # Sample internal coalition shares
+        us_share = self._sample_from_distribution(COALITION_INTERNAL_SHARES['us_base_share'])
+        china_share = self._sample_from_distribution(COALITION_INTERNAL_SHARES['china_base_share'])
+        eu_share = self._sample_from_distribution(COALITION_INTERNAL_SHARES['eu_base_share'])
         
-        for i, relative_share in enumerate(criminal_shares):
-            share = total_criminal_share * relative_share
-            org_size = 'major' if i < 5 else 'minor'  # First 5 are major
-            actor = self._create_criminal_actor(f"Criminal Org #{i+1}", share, org_size)
+        # Normalize to ensure they sum to 1
+        total_explicit = us_share + china_share + eu_share
+        if total_explicit > 1.0:
+            us_share /= total_explicit
+            china_share /= total_explicit
+            eu_share /= total_explicit
+            rest_share = 0.0
+        else:
+            rest_share = 1.0 - total_explicit
+        
+        # Coalition members with their shares
+        coalition_members = [
+            ('US', us_share, 'coalition'),
+            ('China', china_share, 'coalition'),
+            ('EU', eu_share, 'coalition'),
+            ('Rest of Coalition', rest_share, 'coalition')
+        ]
+        
+        for name, share, actor_type in coalition_members:
+            if share <= 0:
+                continue
+            
+            actor = self._create_actor(name, actor_type, coalition_share * share, is_coalition=True)
+            
+            # Coalition gets leading AI R&D multiplier
+            actor.ai_rd_prog_multiplier = self._sample_from_distribution(SOFTWARE_PARAMS['leading_internal_ai_rd_mult'])
+            actor.months_behind_coalition = 0.0  # Coalition is the reference
+            
             actors.append(actor)
         
         return actors
     
-    def _create_criminal_actor(self, name: str, share: float, org_size: str) -> Actor:
-        """Create a criminal organization actor"""
-        actor_compute = self.global_compute * share
-        actor_memory = self.global_memory * share
-        actor_bandwidth = self.global_bandwidth * share
+    def generate_black_site_actors(self) -> List[Actor]:
+        """Generate black site actors (all sanctioned by definition)"""
+        actors = []
         
-        num_clusters, cluster_sizes = self._allocate_cluster_sizes(actor_compute, 'criminal')
+        black_site_configs = [
+            ('us_secret_black_sites', 'us_rogue', 'US Black Site'),
+            ('china_secret_black_sites', 'china_rogue', 'China Black Site'),
+            ('eu_secret_black_sites', 'eu_rogue', 'EU Black Site'),
+            ('random_other_black_sites', 'other_coalition_rogue', 'Coalition Black Site')
+        ]
         
-        return Actor(
-            name=name,
-            actor_type=f'criminal_org_{org_size}',
-            compute_h100e=actor_compute,
-            memory_tb=actor_memory,
-            bandwidth_tb_s=actor_bandwidth,
-            num_clusters=num_clusters,
-            cluster_sizes=cluster_sizes,
-            purchasing_power_billion_usd=self._get_purchasing_power(f'criminal_{org_size}'),
-            ai_rd_prog_multiplier=1.0,
-            months_behind_coalition=self._get_months_behind('criminal'),
-            base_ai_research_talent=self._get_ai_research_talent('criminal'),
-            threat_level=self._assign_threat_level('criminal')
-        )
+        for share_key, count_key, name_prefix in black_site_configs:
+            total_share = self._sample_from_distribution(HARDWARE_SHARES[share_key])
+            count = ACTOR_DEFINITIONS['rogue_black_sites'][count_key]
+            
+            for i in range(count):
+                share = total_share / count
+                name = f"{name_prefix} {i+1}"
+                actor = self._create_actor(name, share_key, share, is_coalition=False)
+                actors.append(actor)
+        
+        return actors
+    
+    def generate_criminal_org_actors(self) -> List[Actor]:
+        """Generate criminal organization actors with dynamic share distribution"""
+        actors = []
+        
+        total_criminal_share = self._sample_from_distribution(HARDWARE_SHARES['all_criminal_orgs'])
+        
+        # Generate shares using power law for more realistic allocation
+        major_count = ACTOR_DEFINITIONS['criminal_orgs']['major_criminal_orgs']
+        minor_count = ACTOR_DEFINITIONS['criminal_orgs']['minor_criminal_orgs']
+        
+        # Create power law distribution for major orgs (more concentrated)
+        major_alphas = [10/(i+1)**1.5 for i in range(major_count)]  # Power law decay
+        major_total = sum(major_alphas)
+        major_shares = [alpha/major_total for alpha in major_alphas]
+        major_total_share = 0.75  # Major orgs get 75% of total
+        
+        # Create more uniform distribution for minor orgs
+        minor_shares = [1/minor_count for _ in range(minor_count)]  # Uniform
+        minor_total_share = 1.0 - major_total_share
+        
+        # Create major criminal orgs
+        for i, relative_share in enumerate(major_shares):
+            share = total_criminal_share * major_total_share * relative_share
+            name = f"Criminal Org #{i+1}"
+            actor = self._create_actor(name, 'criminal_org_major', share, is_coalition=False)
+            actors.append(actor)
+        
+        # Create minor criminal orgs
+        for i, relative_share in enumerate(minor_shares):
+            share = total_criminal_share * minor_total_share * relative_share
+            name = f"Criminal Org #{i+major_count+1}"
+            actor = self._create_actor(name, 'criminal_org_minor', share, is_coalition=False)
+            actors.append(actor)
+        
+        return actors
     
     def generate_nation_state_actors(self) -> List[Actor]:
         """Generate nation state actors"""
         actors = []
         
         # Specific nation states
-        nations = ['russia', 'north_korea', 'iran', 'iraq', 'syria']
+        specific_nations = ['russia', 'north_korea', 'iran', 'iraq', 'syria']
         
-        for nation in nations:
+        for nation in specific_nations:
             if nation in HARDWARE_SHARES:
                 share = self._sample_from_distribution(HARDWARE_SHARES[nation])
             else:
-                # Use other_non_coalition_nations as default
-                share = self._sample_from_distribution(HARDWARE_SHARES['other_non_coalition_nations']) / 5
+                # Use a fraction of other_non_coalition_nations as default
+                share = self._sample_from_distribution(HARDWARE_SHARES['other_non_coalition_nations']) * 0.1
             
-            actor = self._create_nation_actor(nation.replace('_', ' ').title(), share, nation)
+            name = nation.replace('_', ' ').title()
+            actor = self._create_actor(name, nation, share, is_coalition=False)
             actors.append(actor)
         
         # Other non-coalition nations with realistic share distribution
         other_nations_total_share = self._sample_from_distribution(HARDWARE_SHARES['other_non_coalition_nations'])
-        # Subtract shares already allocated to specific nations
-        remaining_share = other_nations_total_share - sum([
-            self._sample_from_distribution(HARDWARE_SHARES.get(nation, HARDWARE_SHARES['other_non_coalition_nations'])) / 5
-            for nation in nations if nation not in HARDWARE_SHARES
-        ])
         
-        # Use predefined shares for other nations
-        other_nation_shares = OTHER_NATION_SHARES[:ACTOR_DEFINITIONS['other_nations']]
+        # Use realistic shares for other nations
+        other_nation_count = ACTOR_DEFINITIONS['other_nations']
+        other_nation_shares = OTHER_NATION_SHARES[:other_nation_count]
         # Normalize the shares to sum to 1
         total_relative = sum(other_nation_shares)
         normalized_shares = [s/total_relative for s in other_nation_shares]
         
         for i, relative_share in enumerate(normalized_shares):
-            share = remaining_share * relative_share
-            actor = self._create_nation_actor(f"Other Nation {i+1}", share, 'other_nation')
+            share = other_nations_total_share * relative_share
+            name = f"Other Nation {i+1}"
+            actor = self._create_actor(name, 'other_nation', share, is_coalition=False)
             actors.append(actor)
         
         return actors
-    
-    def _create_nation_actor(self, name: str, share: float, nation_type: str) -> Actor:
-        """Create a nation state actor"""
-        actor_compute = self.global_compute * share
-        actor_memory = self.global_memory * share
-        actor_bandwidth = self.global_bandwidth * share
-        
-        num_clusters, cluster_sizes = self._allocate_cluster_sizes(actor_compute, nation_type)
-        
-        return Actor(
-            name=name,
-            actor_type=nation_type,
-            compute_h100e=actor_compute,
-            memory_tb=actor_memory,
-            bandwidth_tb_s=actor_bandwidth,
-            num_clusters=num_clusters,
-            cluster_sizes=cluster_sizes,
-            purchasing_power_billion_usd=self._get_purchasing_power(nation_type),
-            ai_rd_prog_multiplier=1.0,
-            months_behind_coalition=self._get_months_behind(nation_type),
-            base_ai_research_talent=self._get_ai_research_talent(nation_type),
-            threat_level=self._assign_threat_level(nation_type)
-        )
     
     def generate_all_actors(self) -> List[Actor]:
         """Generate all actors for the simulation"""
@@ -398,24 +431,36 @@ class ActorGenerator:
         print("Generating nation state actors...")
         all_actors.extend(self.generate_nation_state_actors())
         
-        # Post-process: Update AI R&D multipliers based on talent and hardware
+        # Post-process: Update AI R&D multipliers based on months behind
         self._update_rd_multipliers(all_actors)
         
         return all_actors
     
     def _update_rd_multipliers(self, actors: List[Actor]):
-        """Update AI R&D multipliers based on talent and hardware levels"""
+        """Update AI R&D multipliers based on months behind and other factors"""
+        # Find the leading coalition multiplier for reference
+        coalition_actors = [a for a in actors if a.is_coalition_member]
+        if coalition_actors:
+            leading_multiplier = max(a.ai_rd_prog_multiplier for a in coalition_actors)
+        else:
+            leading_multiplier = 4.0  # Default fallback
+        
         for actor in actors:
-            # Base multiplier from talent
+            if actor.is_coalition_member:
+                # Coalition actors keep their sampled multipliers
+                continue
+            
+            # Convert months behind to appropriate multiplier
+            actor.ai_rd_prog_multiplier = months_behind_to_multiplier(
+                leading_multiplier, actor.months_behind_coalition
+            )
+            
+            # Apply talent and hardware modifiers
             talent_multiplier = actor.base_ai_research_talent
+            hardware_boost = 1.0 + np.log10(max(1, actor.compute_h100e / 1000)) * 0.05
             
-            # Hardware boost (more compute = faster research)
-            hardware_boost = 1.0 + np.log10(max(1, actor.compute_h100e / 1000)) * 0.1
-            
-            # Coalition penalty/boost
-            coalition_multiplier = 1.2 if actor.is_coalition_member else 0.8
-            
-            actor.ai_rd_prog_multiplier = talent_multiplier * hardware_boost * coalition_multiplier
+            # Final multiplier
+            actor.ai_rd_prog_multiplier *= talent_multiplier * hardware_boost
     
     def print_actor_statistics(self, actors: List[Actor]):
         """Print comprehensive statistics about generated actors"""
@@ -512,13 +557,20 @@ def save_actors_to_csv(actors: List[Actor], filename: str = "ai_pause_actors.csv
             'bandwidth_tb_s': actor.bandwidth_tb_s,
             'num_clusters': actor.num_clusters,
             'largest_cluster_size': max(actor.cluster_sizes) if actor.cluster_sizes else 0,
+            'compute_lifetime_years': actor.compute_lifetime_years,
+            'memory_lifetime_years': actor.memory_lifetime_years,
+            'bandwidth_lifetime_years': actor.bandwidth_lifetime_years,
             'purchasing_power_billion_usd': actor.purchasing_power_billion_usd,
             'ai_rd_prog_multiplier': actor.ai_rd_prog_multiplier,
             'months_behind_coalition': actor.months_behind_coalition,
             'base_ai_research_talent': actor.base_ai_research_talent,
             'threat_level': actor.threat_level,
-            'is_sanctioned': actor.is_sanctioned,
-            'is_coalition_member': actor.is_coalition_member
+            'security_level': actor.security_level,
+            'military_defense_level': actor.military_defense_level,
+            'sabotage_slowdown_factor': actor.sabotage_slowdown_factor,
+            'neutralization_probability': actor.neutralization_probability,
+            'is_coalition_member': actor.is_coalition_member,
+            'is_neutralized': actor.is_neutralized
         })
     
     df = pd.DataFrame(data)
